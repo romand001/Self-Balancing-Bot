@@ -35,6 +35,10 @@ using namespace std;
 //derivative calculation
 #define DT 5
 
+// integral calculation
+#define MAX_ANGLE_INT 50000.0f
+#define MAX_VELOCITY_INT 500000.0f
+
 //motion control
 #define MICRO_UPPER_THRESH 30000
 #define MICRO_LOWER_THRESH 3000
@@ -100,20 +104,18 @@ BluetoothSerial SerialBT;
 double angle_kP;
 double angle_kI;
 double angle_kD;
-const uint16_t angleBufferSize = 500;
-double angleSum = 0;
+double angleIntegral = 0;
 vector<double> angleBuffer;
 
 double velocity_kP;
 double velocity_kI;
 double velocity_kD;
-const uint16_t velocityBufferSize = 500;
-double velocitySum = 0;
+double velocityIntegral = 0;
 vector<double> velocityBuffer;
 
 //motion control vars
 double targetAngle = 0.0;
-double maxTargetAngle = 1.0 * PI/180; //1 degree
+double maxTargetAngle = 10.0; //10 degrees
 int targetVelocity = 0;
 uint8_t microsteppingFactor = 32;
 unsigned int steppedFrequency0 = 0;
@@ -378,18 +380,37 @@ void mainTask(void * pvParameters) {
         xSemaphoreTake(angleSem, portMAX_DELAY);
         angle = angleRad * 180.0/PI;
         xSemaphoreGive(angleSem);
-        double angleError = angleRad - targetAngle;
+        double angleError = angle - targetAngle;
         angleBuffer.push_back(angleError);
         uint16_t currentAngleBufferSize = angleBuffer.size();
-        if (currentAngleBufferSize >= angleBufferSize) angleBuffer.erase(angleBuffer.begin());
-        if (currentAngleBufferSize >= 2) angleSum += (angleBuffer[-1] - angleBuffer[0]);
+        if (currentAngleBufferSize >= DT) angleBuffer.erase(angleBuffer.begin());
 
         //handle velocity error buffer;
-        double velocityError = (double)(velocity - targetVelocity);
-        velocityBuffer.push_back(velocityError / 10000.0); //scale down to avoid large numbers
+        double velocityError = (double)(velocity - targetVelocity) / 10000.0;
+        velocityBuffer.push_back(velocityError); //scale down to avoid large numbers
         uint16_t currentVelocityBufferSize = velocityBuffer.size();
-        if (currentVelocityBufferSize >= velocityBufferSize) velocityBuffer.erase(velocityBuffer.begin());
-        if (currentVelocityBufferSize >= 2) velocitySum += (velocityBuffer[-1] - velocityBuffer[0]);
+        if (currentVelocityBufferSize >= DT) velocityBuffer.erase(velocityBuffer.begin());
+
+        // accumulate and check bounds
+        angleIntegral += angleError;
+        if (angleIntegral > MAX_ANGLE_INT) {
+            Serial.println("reached max angle integral");
+            angleIntegral = MAX_ANGLE_INT;
+        } 
+        if (angleIntegral < -MAX_ANGLE_INT) {
+            Serial.println("reached max angle integral");
+            angleIntegral = -MAX_ANGLE_INT;
+        } 
+
+        velocityIntegral += velocityError;
+        if (velocityIntegral > MAX_VELOCITY_INT) {
+            Serial.println("reached max velocity integral");
+            velocityIntegral = MAX_VELOCITY_INT;
+        } 
+        if (velocityIntegral < -MAX_VELOCITY_INT) {
+            Serial.println("reached max velocity integral");
+            velocityIntegral = -MAX_VELOCITY_INT;
+        } 
         
 
         bool debugging = false;
@@ -401,14 +422,13 @@ void mainTask(void * pvParameters) {
         }
 
         //enough data to begin correcting
-        if (currentAngleBufferSize >= DT+1 && currentVelocityBufferSize >= DT+1) {
+        if (currentAngleBufferSize >= 2) {
 
             //PID calculation for outer velocity control loop
             xSemaphoreTake(paramSem, portMAX_DELAY);
-            double velocity_P = - 0.00000001 * velocity_kP * velocityError;
-            double velocity_I = - 0.00000001 * velocity_kI * velocitySum;
-            double velocity_D = - 0.00000001 * velocity_kD * (velocityBuffer[currentVelocityBufferSize-1]
-                                                - velocityBuffer[currentVelocityBufferSize-DT-1]);
+            double velocity_P = - 0.000001 * velocity_kP * velocityError;
+            double velocity_I = - 0.000001 * velocity_kI * velocityIntegral;
+            double velocity_D = - 0.000001 * velocity_kD * (velocityBuffer.back() - velocityBuffer.front());
             xSemaphoreGive(paramSem);
             //correction amount for the target angle
             double targetAngleAdjust = velocity_P + velocity_I + velocity_D;
@@ -421,9 +441,8 @@ void mainTask(void * pvParameters) {
             //PID calculation for inner angle control loop
             xSemaphoreTake(paramSem, portMAX_DELAY);
             double angle_P = - angle_kP * angleError;
-            double angle_I = - angle_kI * (0.5 / accelPollRate * angleSum);
-            double angle_D = - angle_kD * ((angleBuffer[currentAngleBufferSize-1]
-                                            - angleBuffer[currentAngleBufferSize-DT-1]) * accelPollRate);
+            double angle_I = - angle_kI * (0.5 / accelPollRate * angleIntegral);
+            double angle_D = - angle_kD * accelPollRate * (angleBuffer.back() - angleBuffer.front());
             xSemaphoreGive(paramSem);
             //correction amount for velocity
             int velocityAdjust = (int) (angle_P + angle_I + angle_D);
@@ -503,6 +522,8 @@ void mainTask(void * pvParameters) {
             frequency1 = 0;
             angleBuffer.clear();
             velocityBuffer.clear();
+            angleIntegral = 0.0;
+            velocityIntegral = 0.0;
         }
 
         //set up timers for new frequencies
