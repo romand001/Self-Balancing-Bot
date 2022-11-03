@@ -48,7 +48,7 @@ using namespace std;
 #define TESTING 0
 #define ANGLE_CONTROL 1
 #define SPEED_CONTROL 2
-uint8_t mode = SPEED_CONTROL;
+volatile uint8_t mode = SPEED_CONTROL;
 
 //task control
 TaskHandle_t mainTaskHandle;
@@ -77,7 +77,6 @@ double angle = 0.0;
 float angleRad = 0.0;
 unsigned long currentTime;
 unsigned long lastPollTime;
-bool dataReady;
 Quaternion q; // [w, x, y, z] quaternion container
 VectorFloat gravity; // [x, y, z] gravity vector
 float ypr[3]; // [yaw, pitch, roll] yaw/pitch/roll container and gravity vector
@@ -100,11 +99,10 @@ String rcvMsg = "";
 BluetoothSerial SerialBT;
 
 //PID parameters
-//should params be volatile???
-double angle_kP;
-double angle_kI;
-double angle_kD;
-double angleIntegral = 0;
+volatile double angle_kP;
+volatile double angle_kI;
+volatile double angle_kD;
+volatile double angleIntegral = 0;
 vector<double> angleBuffer;
 
 double velocity_kP;
@@ -358,9 +356,8 @@ void comTask(void * pvParameters) {
 
         //transmit angle over bluetooth
         currentTXTime = millis();
-        if (dataReady && currentTXTime - lastTXTime >= 50) {
+        if (currentTXTime - lastTXTime >= 50) {
             lastTXTime = currentTXTime;
-            dataReady = false;
             xSemaphoreTake(angleSem, portMAX_DELAY);
             SerialBT.println("a" + (String)angle);
             xSemaphoreGive(angleSem);
